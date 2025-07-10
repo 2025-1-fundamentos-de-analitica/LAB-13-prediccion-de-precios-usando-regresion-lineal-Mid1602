@@ -61,3 +61,145 @@
 # {'type': 'metrics', 'dataset': 'train', 'r2': 0.8, 'mse': 0.7, 'mad': 0.9}
 # {'type': 'metrics', 'dataset': 'test', 'r2': 0.7, 'mse': 0.6, 'mad': 0.8}
 #
+import pandas as pd
+import pandas as pd
+import gzip
+import pickle
+import json
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, MinMaxScaler
+from sklearn.feature_selection import SelectKBest, f_regression
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import GridSearchCV
+from sklearn.metrics import r2_score, mean_squared_error, median_absolute_error
+import os
+from glob import glob 
+
+def cargar_datos():
+    # Cargar datos de prueba y entrenamiento
+    prueba = pd.read_csv(
+        "./files/input/test_data.csv.zip",
+        index_col=False,
+        compression="zip",
+    )
+
+    entrenamiento = pd.read_csv(
+        "./files/input/train_data.csv.zip",
+        index_col=False,
+        compression="zip",
+    )
+
+    return entrenamiento, prueba
+
+def limpiar_datos(df):
+    # Limpiar y preprocesar los datos
+    df_limpio = df.copy()
+    año_actual = 2021
+    columnas_a_eliminar = ['Year', 'Car_Name']
+    df_limpio["Edad"] = año_actual - df_limpio["Year"]
+    df_limpio = df_limpio.drop(columns=columnas_a_eliminar)
+    return df_limpio
+
+def dividir_datos(df):
+    # Dividir en características (X) y objetivo (Y)
+    X = df.drop(columns=["Present_Price"])
+    y = df["Present_Price"]
+    return X, y
+
+def crear_pipeline(X_train):
+    # Crear un pipeline con procesamiento de datos y modelo
+    cat_features = ['Fuel_Type', 'Selling_type', 'Transmission']
+    num_features = [col for col in X_train.columns if col not in cat_features]
+
+    preprocesador = ColumnTransformer(
+        transformers=[
+            ('cat', OneHotEncoder(), cat_features),
+            ('scaler', MinMaxScaler(), num_features),
+        ],
+    )
+
+    pipeline = Pipeline(
+        [
+            ("preprocesador", preprocesador),
+            ('selector', SelectKBest(f_regression)),
+            ('modelo', LinearRegression())
+        ]
+    )
+    return pipeline
+
+def crear_estimador(pipeline):
+    # Crear un estimador con búsqueda de hiperparámetros
+    grid = {
+        'selector__k': range(1, 25),
+        'modelo__fit_intercept': [True, False],
+        'modelo__positive': [True, False]
+    }
+
+    busqueda = GridSearchCV(
+        estimator=pipeline,
+        param_grid=grid,
+        cv=10,
+        scoring='neg_mean_absolute_error',
+        n_jobs=-1,
+        refit=True,
+        verbose=1
+    )
+
+    return busqueda
+
+def _crear_directorio_salida(directorio):
+    # Crear o limpiar directorio de salida
+    if os.path.exists(directorio):
+        for archivo in glob(f"{directorio}/*"):
+            os.remove(archivo)
+        os.rmdir(directorio)
+    os.makedirs(directorio)
+
+def _guardar_modelo(ruta, estimador):
+    # Guardar el modelo entrenado
+    _crear_directorio_salida("files/models/")
+
+    with gzip.open(ruta, "wb") as f:
+        pickle.dump(estimador, f)
+
+def calcular_metricas(tipo, y_true, y_pred):
+    # Calcular las métricas de evaluación
+    return {
+        "tipo": "metricas",
+        "conjunto": tipo,
+        'r2': float(r2_score(y_true, y_pred)),
+        'mse': float(mean_squared_error(y_true, y_pred)),
+        'mad': float(median_absolute_error(y_true, y_pred)),
+    }
+
+def _ejecutar_trabajos():
+    # Función principal que ejecuta el flujo de trabajo
+    train, test = cargar_datos()
+    train = limpiar_datos(train)
+    test = limpiar_datos(test)
+    X_train, y_train = dividir_datos(train)
+    X_test, y_test = dividir_datos(test)
+    pipeline = crear_pipeline(X_train)
+
+    estimador = crear_estimador(pipeline)
+    estimador.fit(X_train, y_train)
+
+    _guardar_modelo(
+        os.path.join("files/models/", "modelo.pkl.gz"),
+        estimador,
+    )
+
+    y_pred_test = estimador.predict(X_test)
+    metricas_test = calcular_metricas("prueba", y_test, y_pred_test)
+    y_pred_train = estimador.predict(X_train)
+    metricas_train = calcular_metricas("entrenamiento", y_train, y_pred_train)
+
+    os.makedirs("files/output/", exist_ok=True)
+
+    with open("files/output/metricas.json", "w", encoding="utf-8") as archivo:
+        archivo.write(json.dumps(metricas_train) + "\n")
+        archivo.write(json.dumps(metricas_test) + "\n")
+
+if __name__ == "__main__":
+    _ejecutar_trabajos()
